@@ -1,7 +1,6 @@
-use std::{error, mem::swap};
+use std::{array, error, mem::swap};
 
 use bindings::windows::foundation::numerics::{Vector2, Vector3};
-use bindings::windows::win32::com::HRESULT;
 use bindings::windows::win32::direct3d11::*;
 use bindings::windows::win32::dxgi::*;
 use bindings::windows::win32::menus_and_resources::HMENU;
@@ -16,10 +15,14 @@ use bindings::windows::win32::windows_and_messaging::{
 use flower_box::GraphicsDevice;
 use windows::{Abi, Interface};
 
+const WIDTH: i32 = 640;
+const HEIGHT: i32 = 480;
+
 struct DirectX11GraphicsDevice {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
     swapchain: IDXGISwapChain,
+    backbuffer_rtv: ID3D11RenderTargetView,
 }
 
 impl DirectX11GraphicsDevice {
@@ -30,8 +33,8 @@ impl DirectX11GraphicsDevice {
 
         let swapchain_desc = DXGI_SWAP_CHAIN_DESC {
             buffer_desc: DXGI_MODE_DESC {
-                width: 640,
-                height: 480,
+                width: WIDTH as u32,
+                height: HEIGHT as u32,
                 format: DXGI_FORMAT::DXGI_FORMAT_R8G8B8A8_UNORM,
                 ..Default::default()
             },
@@ -71,28 +74,116 @@ impl DirectX11GraphicsDevice {
             let swapchain = swapchain?;
 
             let mut backbuffer: Option<ID3D11Resource> = None;
-            let error_code = swapchain.GetBuffer(0, &IDXGISurface::IID, backbuffer.set_abi());
+            let error_code = swapchain.GetBuffer(0, &ID3D11Resource::IID, backbuffer.set_abi());
             if error_code.is_err() {
                 panic!(error_code.message());
             }
-            let mut render_target_view: Option<ID3D11RenderTargetView> = None;
+            let mut backbuffer_rtv: Option<ID3D11RenderTargetView> = None;
 
-            let error_code = device.CreateRenderTargetView(
-                backbuffer,
+            let error_code =
+                device.CreateRenderTargetView(backbuffer, std::ptr::null(), &mut backbuffer_rtv);
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            let view_port = D3D11_VIEWPORT {
+                top_leftx: 0.0,
+                top_lefty: 0.0,
+                width: WIDTH as f32,
+                height: HEIGHT as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+
+            device_context.RSSetViewports(1, &view_port);
+
+            let depth_stencil_desc = D3D11_DEPTH_STENCIL_DESC {
+                depth_enable: BOOL::from(true),
+                depth_write_mask: D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ALL,
+                depth_func: D3D11_COMPARISON_FUNC::D3D11_COMPARISON_LESS_EQUAL,
+                // Stencil Text
+                stencil_enable: BOOL::from(false),
+                stencil_read_mask: 0xFF,
+                stencil_write_mask: 0xFF,
+                front_face: D3D11_DEPTH_STENCILOP_DESC {
+                    stencil_fail_op: D3D11_STENCIL_OP::D3D11_STENCIL_OP_KEEP,
+                    stencil_depth_fail_op: D3D11_STENCIL_OP::D3D11_STENCIL_OP_INCR,
+                    stencil_pass_op: D3D11_STENCIL_OP::D3D11_STENCIL_OP_KEEP,
+                    stencil_func: D3D11_COMPARISON_FUNC::D3D11_COMPARISON_ALWAYS,
+                },
+                back_face: D3D11_DEPTH_STENCILOP_DESC {
+                    stencil_fail_op: D3D11_STENCIL_OP::D3D11_STENCIL_OP_KEEP,
+                    stencil_depth_fail_op: D3D11_STENCIL_OP::D3D11_STENCIL_OP_DECR,
+                    stencil_pass_op: D3D11_STENCIL_OP::D3D11_STENCIL_OP_KEEP,
+                    stencil_func: D3D11_COMPARISON_FUNC::D3D11_COMPARISON_ALWAYS,
+                },
+            };
+
+            let mut depth_stencil_state: Option<ID3D11DepthStencilState> = None;
+            let error_code =
+                device.CreateDepthStencilState(&depth_stencil_desc, &mut depth_stencil_state);
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            device_context.OMSetDepthStencilState(&depth_stencil_state, 1);
+
+            let depth_texture_desc = D3D11_TEXTURE2D_DESC {
+                width: WIDTH as u32,
+                height: HEIGHT as u32,
+                mip_levels: 1,
+                array_size: 1,
+                format: DXGI_FORMAT::DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+                sample_desc: DXGI_SAMPLE_DESC {
+                    count: 1,
+                    quality: 0,
+                },
+                usage: D3D11_USAGE::D3D11_USAGE_DEFAULT,
+                bind_flags: D3D11_BIND_FLAG::D3D11_BIND_DEPTH_STENCIL.0 as u32,
+                cpu_access_flags: 0,
+                misc_flags: 0,
+            };
+
+            let mut depth_stencil_texture: Option<ID3D11Texture2D> = None;
+            let error_code = device.CreateTexture2D(
+                &depth_texture_desc,
                 std::ptr::null(),
-                &mut render_target_view,
+                &mut depth_stencil_texture,
             );
             if error_code.is_err() {
-                println!("{}", error_code.message());
                 panic!(error_code.message());
             }
 
-            let render_target_view = render_target_view?;
+            let depth_stencil_texture = depth_stencil_texture?;
+
+            let depth_stencil_view_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
+                format: depth_texture_desc.format,
+                view_dimension: D3D11_DSV_DIMENSION::D3D11_DSV_DIMENSION_TEXTURE2DMS,
+                flags: 0,
+                anonymous: D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+                    texture2d: D3D11_TEX2D_DSV { mip_slice: 0 },
+                },
+            };
+
+            let mut depth_stencil_view: Option<ID3D11DepthStencilView> = None;
+            let error_code = device.CreateDepthStencilView(
+                &depth_stencil_texture,
+                &depth_stencil_view_desc,
+                &mut depth_stencil_view,
+            );
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            device_context.OMSetRenderTargets(1, &mut backbuffer_rtv, &depth_stencil_view);
+
+            let backbuffer_rtv = backbuffer_rtv?;
 
             Some(DirectX11GraphicsDevice {
                 device,
                 device_context,
                 swapchain,
+                backbuffer_rtv,
             })
         }
     }
@@ -135,8 +226,8 @@ fn create_window() -> Option<HWND> {
             WINDOWS_STYLE::WS_OVERLAPPEDWINDOW,
             0,
             0,
-            640,
-            480,
+            WIDTH,
+            HEIGHT,
             HWND(0),
             HMENU(0),
             HINSTANCE(0),
@@ -170,7 +261,7 @@ fn main() {
                 }
             }
 
-            let _ = graphics_device.swapchain.Present(1, 0);
+            //let _ = graphics_device.swapchain.Present(1, 0);
         }
     }
 }
