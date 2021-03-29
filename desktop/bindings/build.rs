@@ -2,7 +2,7 @@ fn main() {
     windows::build!(
         windows::win32::direct3d11::*,
         windows::win32::dxgi::*,
-        windows::win32::system_services::{BOOL, GetModuleHandleA, HINSTANCE, LRESULT, PSTR},
+        windows::win32::system_services::{BOOL, GetModuleHandleA, HINSTANCE, LRESULT, PSTR, PWSTR},
         windows::win32::menus_and_resources::HMENU,
         windows::win32::windows_and_messaging::{
           CreateWindowExA,
@@ -28,5 +28,6 @@ fn main() {
         },
         windows::foundation::numerics::{Vector2, Vector3},
         windows::win32::com::HRESULT,
+        windows::win32::direct3d_hlsl::*
     );
 }

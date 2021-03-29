@@ -10,10 +10,17 @@ checksum = "fb58b6451e8c2a812ad979ed1d83378caa5e927eef2622017a45f251457c2c9d"
 name = "desktop"
 version = "0.1.0"
 dependencies = [
+ "directx_math",
  "flower_box",
  "windows",
  "windows_bindings",
 ]
+
+[[package]]
+name = "directx_math"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eef899a5213fad97e095a4695d21cd4398a3e393fe0825954135e27f9da7bc4"
 
 [[package]]
 name = "flower_box"

@@ -1,22 +1,27 @@
-use std::{array, error, mem::swap};
-
 use bindings::windows::foundation::numerics::{Vector2, Vector3};
 use bindings::windows::win32::direct3d11::*;
+use bindings::windows::win32::direct3d_hlsl::*;
 use bindings::windows::win32::dxgi::*;
 use bindings::windows::win32::menus_and_resources::HMENU;
-use bindings::windows::win32::system_services::{GetModuleHandleA, BOOL, HINSTANCE, LRESULT, PSTR};
+use bindings::windows::win32::system_services::{
+    GetModuleHandleA, BOOL, HINSTANCE, LRESULT, PSTR, PWSTR,
+};
 use bindings::windows::win32::windows_and_messaging::{
     CreateWindowExA, DefWindowProcA, DispatchMessageA, PeekMessageA, PeekMessage_wRemoveMsg,
     PostQuitMessage, RegisterClassA, ShowWindow, TranslateMessage, HWND, LPARAM, MSG,
     SHOW_WINDOW_CMD, WINDOWS_EX_STYLE, WINDOWS_STYLE, WM_DESTROY, WM_QUIT, WNDCLASSA,
     WNDCLASS_STYLES, WPARAM,
 };
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 
+use flower_box::cube::Vertex;
 use flower_box::GraphicsDevice;
+use flower_box::{draw, upload_mesh};
 use windows::{Abi, Interface};
 
-const WIDTH: i32 = 640;
-const HEIGHT: i32 = 480;
+const WIDTH: i32 = 1920;
+const HEIGHT: i32 = 1080;
 
 struct DirectX11GraphicsDevice {
     device: ID3D11Device,
@@ -179,6 +184,113 @@ impl DirectX11GraphicsDevice {
 
             let backbuffer_rtv = backbuffer_rtv?;
 
+            let mut shader_name: Vec<u16> = OsStr::new("src/shader.hlsl").encode_wide().collect();
+            shader_name.push(0); // null terminate
+
+            let mut vertex_blob: Option<ID3DBlob> = None;
+            let mut error_messages: Option<ID3DBlob> = None;
+            let error_code = D3DCompileFromFile(
+                PWSTR(shader_name.as_mut_ptr()),
+                std::ptr::null(),
+                None,
+                PSTR(b"VS\0".as_ptr() as _),
+                PSTR(b"vs_5_0\0".as_ptr() as _),
+                D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
+                0,
+                &mut vertex_blob,
+                &mut error_messages,
+            );
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            let vertex_blob = vertex_blob?;
+
+            let mut vertex_shader: Option<ID3D11VertexShader> = None;
+            let error_code = device.CreateVertexShader(
+                vertex_blob.GetBufferPointer(),
+                vertex_blob.GetBufferSize(),
+                None,
+                &mut vertex_shader,
+            );
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            device_context.VSSetShader(vertex_shader, std::ptr::null_mut(), 0);
+
+            let mut pixel_blob: Option<ID3DBlob> = None;
+            let error_code = D3DCompileFromFile(
+                PWSTR(shader_name.as_mut_ptr()),
+                std::ptr::null(),
+                None,
+                PSTR(b"PS\0".as_ptr() as _),
+                PSTR(b"ps_5_0\0".as_ptr() as _),
+                D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
+                0,
+                &mut pixel_blob,
+                &mut error_messages,
+            );
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            let pixel_blob = pixel_blob?;
+
+            let mut pixel_shader: Option<ID3D11PixelShader> = None;
+            let error_code = device.CreatePixelShader(
+                pixel_blob.GetBufferPointer(),
+                pixel_blob.GetBufferSize(),
+                None,
+                &mut pixel_shader,
+            );
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            device_context.PSSetShader(pixel_shader, std::ptr::null_mut(), 0);
+
+            let input_layout_desc = D3D11_INPUT_ELEMENT_DESC {
+                semantic_name: PSTR(b"POSITION\0".as_ptr() as _),
+                semantic_index: 0,
+                format: DXGI_FORMAT::DXGI_FORMAT_R32G32B32_FLOAT,
+                input_slot: 0,
+                aligned_byte_offset: 0,
+                input_slot_class: D3D11_INPUT_CLASSIFICATION::D3D11_INPUT_PER_VERTEX_DATA,
+                instance_data_step_rate: 0,
+            };
+            let mut input_layout: Option<ID3D11InputLayout> = None;
+            let error_code = device.CreateInputLayout(
+                &input_layout_desc,
+                1,
+                vertex_blob.GetBufferPointer(),
+                vertex_blob.GetBufferSize(),
+                &mut input_layout,
+            );
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            device_context.IASetInputLayout(&input_layout);
+
+            device_context.IASetPrimitiveTopology(
+                D3D_PRIMITIVE_TOPOLOGY::D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+            );
+
+            let rasterizer_desc = D3D11_RASTERIZER_DESC {
+                fill_mode: D3D11_FILL_MODE::D3D11_FILL_SOLID,
+                cull_mode: D3D11_CULL_MODE::D3D11_CULL_NONE,
+                ..Default::default()
+            };
+
+            let mut rasterizer_state: Option<ID3D11RasterizerState> = None;
+            let error_code = device.CreateRasterizerState(&rasterizer_desc, &mut rasterizer_state);
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            device_context.RSSetState(&rasterizer_state);
+
             Some(DirectX11GraphicsDevice {
                 device,
                 device_context,
@@ -190,7 +302,71 @@ impl DirectX11GraphicsDevice {
 }
 
 impl GraphicsDevice for DirectX11GraphicsDevice {
-    fn set_vertex_buffer() {}
+    fn set_vertex_buffer(&self, vertices: &[Vertex]) {
+        let vertex_size = 3 * std::mem::size_of::<f32>() as u32;
+        let buffer_desc = D3D11_BUFFER_DESC {
+            byte_width: vertex_size * vertices.len() as u32,
+            usage: D3D11_USAGE::D3D11_USAGE_DEFAULT,
+            bind_flags: D3D11_BIND_FLAG::D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            //bind_flags: 1,
+            ..Default::default()
+        };
+        let buffer_subresource_data = D3D11_SUBRESOURCE_DATA {
+            p_sys_mem: vertices.as_ptr() as _,
+            sys_mem_pitch: 0,
+            sys_mem_slice_pitch: 0,
+        };
+        let mut buffer: Option<ID3D11Buffer> = None;
+        unsafe {
+            let error_code =
+                self.device
+                    .CreateBuffer(&buffer_desc, &buffer_subresource_data, &mut buffer);
+            if error_code.is_err() {
+                panic!(error_code.message())
+            }
+
+            let p_offsets = 0;
+            self.device_context
+                .IASetVertexBuffers(0, 1, &mut buffer, &vertex_size, &p_offsets);
+        }
+    }
+    fn set_index_buffer(&self, indices: &[u32]) {
+        let index_size = std::mem::size_of::<u32>() as u32;
+        let buffer_desc = D3D11_BUFFER_DESC {
+            byte_width: index_size * indices.len() as u32,
+            usage: D3D11_USAGE::D3D11_USAGE_IMMUTABLE,
+            bind_flags: D3D11_BIND_FLAG::D3D11_BIND_INDEX_BUFFER.0 as u32,
+            ..Default::default()
+        };
+
+        let buffer_subresource_data = D3D11_SUBRESOURCE_DATA {
+            p_sys_mem: indices.as_ptr() as _,
+            sys_mem_pitch: 0,
+            sys_mem_slice_pitch: 0,
+        };
+        let mut buffer: Option<ID3D11Buffer> = None;
+        unsafe {
+            let error_code =
+                self.device
+                    .CreateBuffer(&buffer_desc, &buffer_subresource_data, &mut buffer);
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+
+            self.device_context
+                .IASetIndexBuffer(buffer, DXGI_FORMAT::DXGI_FORMAT_R32_UINT, 0);
+        }
+    }
+
+    fn draw(&self, num_vertices: u32) {
+        unsafe {
+            self.device_context.DrawIndexed(num_vertices, 0, 0);
+            let error_code = self.swapchain.Present(1, 0);
+            if error_code.is_err() {
+                panic!(error_code.message());
+            }
+        }
+    }
 }
 
 extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -242,13 +418,12 @@ fn create_window() -> Option<HWND> {
 }
 
 fn main() {
-    //let mut window = Window::new();
-    //window.run()
-
     let hwnd = create_window().unwrap();
 
-    let graphics_device = DirectX11GraphicsDevice::new(hwnd).unwrap();
+    let graphics_device: Box<dyn GraphicsDevice> =
+        Box::new(DirectX11GraphicsDevice::new(hwnd).unwrap());
 
+    upload_mesh(&graphics_device);
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
         loop {
@@ -261,6 +436,8 @@ fn main() {
                 }
             }
 
+            draw(&graphics_device);
+            //graphics_device.device_context.Draw(4, 0);
             //let _ = graphics_device.swapchain.Present(1, 0);
         }
     }

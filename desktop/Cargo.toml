@@ -10,6 +10,7 @@ edition = "2018"
 windows = "0.6.0"
 flower_box = { path = "../flower_box" }
 bindings = { package = "windows_bindings", path = "bindings" }
+directx_math = "0.2.1"
 
 [build-dependencies]
 windows = "0.6.0"
